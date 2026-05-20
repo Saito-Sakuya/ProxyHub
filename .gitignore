@@ -1,0 +1,45 @@
+# ==================== ProxyHub .gitignore ====================
+
+# Runtime configuration (contains sensitive subscription URLs & credentials)
+config.json
+
+# Mihomo core binary & generated runtime config
+bin/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+*.pyo
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec.bak
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# OS generated
+desktop.ini
+ehthumbs.db
+
+# Docker
+docker-compose.override.yml
+
+# Logs
+*.log
