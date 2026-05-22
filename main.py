@@ -613,10 +613,27 @@ class SystemSettingsReq(BaseModel):
     dashboard_username: str = "admin"
     dashboard_password: str = "admin"
 
+import re
+URL_SAFE_PATTERN = re.compile(r'^[A-Za-z0-9\-_.]*$')
+
+def validate_credential_safe(value: str, field_name: str):
+    """Reject credentials containing URL-unsafe characters like @ # ! * % : / ?"""
+    if value and not URL_SAFE_PATTERN.match(value):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} 包含不安全字符！仅允许字母、数字、连字符(-)、下划线(_)、点(.)。特殊字符会导致代理客户端 URL 解析失败。"
+        )
+
 @app.post("/api/system/settings")
 async def post_system_settings(req: SystemSettingsReq, background_tasks: BackgroundTasks):
     """Update general system and smart proxy settings, auto-triggering necessary core restarts."""
     global smart_proxy, core_manager
+    
+    # Validate SOCKS5 credentials for URL safety
+    if req.socks5_auth_enabled:
+        validate_credential_safe(req.socks5_auth_username, "SOCKS5 用户名")
+        validate_credential_safe(req.socks5_auth_password, "SOCKS5 密码")
+    
     cfg = load_config()
     
     old_smart_port = cfg.get("smart_port", 1080)
@@ -672,6 +689,12 @@ async def post_system_settings(req: SystemSettingsReq, background_tasks: Backgro
 @app.post("/api/port/credentials")
 async def post_port_credentials(req: PortCredentialsReq, background_tasks: BackgroundTasks):
     """Save custom credentials for each country's static ports and rebuild config."""
+    # Validate all credentials for URL safety
+    for country, creds in req.credentials.items():
+        if isinstance(creds, dict):
+            validate_credential_safe(creds.get("username", ""), f"国家 {country} 的用户名")
+            validate_credential_safe(creds.get("password", ""), f"国家 {country} 的密码")
+    
     cfg = load_config()
     cfg["port_credentials"] = req.credentials
     if not save_config(cfg):

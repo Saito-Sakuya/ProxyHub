@@ -1008,6 +1008,12 @@ function renderPortCredentialsTable() {
     });
 }
 
+// URL-safe credential validator: only allows alphanumeric, hyphen, underscore, dot
+function isCredentialSafe(str) {
+    if (!str) return true;
+    return /^[A-Za-z0-9\-_.]+$/.test(str);
+}
+
 async function savePortCredentials() {
     const portCredentialsTableBody = document.getElementById('portCredentialsTableBody');
     const btnSavePortCredentials = document.getElementById('btnSavePortCredentials');
@@ -1024,6 +1030,12 @@ async function savePortCredentials() {
         const password = row.querySelector('.port-cred-pass').value;
         
         if (username || password) {
+            if (!isCredentialSafe(username) || !isCredentialSafe(password)) {
+                alert(`国家 ${country} 的用户名或密码包含不安全字符！\n\n仅允许：字母、数字、连字符(-)、下划线(_)、点(.)\n不允许：@ # ! * % : / ? & = 等特殊字符\n\n原因：特殊字符会导致代理客户端 URL 解析失败。`);
+                btnSavePortCredentials.disabled = false;
+                btnSavePortCredentials.textContent = '保存端口配置';
+                return;
+            }
             credentials[country] = { username, password };
         }
     });
@@ -1086,12 +1098,22 @@ if (btnSaveSystemSettings) {
             return;
         }
         
+        const socksUser = settingSocksUsername.value.trim();
+        const socksPass = settingSocksPassword.value;
+        
+        if (settingSocksEnabled.checked && (!isCredentialSafe(socksUser) || !isCredentialSafe(socksPass))) {
+            alert('SOCKS5 用户名或密码包含不安全字符！\n\n仅允许：字母、数字、连字符(-)、下划线(_)、点(.)\n不允许：@ # ! * % : / ? & = 等特殊字符\n\n原因：特殊字符会导致代理客户端 URL 解析失败。');
+            btnSaveSystemSettings.disabled = false;
+            btnSaveSystemSettings.textContent = '保存系统配置';
+            return;
+        }
+        
         const payload = {
             smart_port: parseInt(settingSmartPort.value) || 1080,
             port_pool_start: parseInt(settingPortPoolStart.value) || 20000,
             socks5_auth_enabled: settingSocksEnabled.checked,
-            socks5_auth_username: settingSocksUsername.value.trim(),
-            socks5_auth_password: settingSocksPassword.value,
+            socks5_auth_username: socksUser,
+            socks5_auth_password: socksPass,
             sticky_session_ttl_minutes: parseInt(settingStickyTTL.value) || 30,
             alarm_threshold_percent: parseInt(settingAlarmPercent.value) || 50,
             dashboard_username: newDashboardUser,
