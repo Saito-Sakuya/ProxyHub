@@ -6,7 +6,7 @@ services:
     container_name: proxyhub-service
     restart: always
     ports:
-      - "8000:8000"                # Web Dashboard Panel
+      - "127.0.0.1:8000:8000"      # Web Dashboard Panel (SSH tunnel only)
       - "1080:1080"                # Smart SOCKS5 Gateway
       - "20000-20050:20000-20050"  # Physical multi-country dedicated port pools
     volumes:
