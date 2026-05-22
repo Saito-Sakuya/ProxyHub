@@ -234,22 +234,19 @@ class CoreManager:
             "proxies": node_names
         })
 
-        # Add Global Listeners
+        # Add Global Listeners (bind to 127.0.0.1 - only SmartProxy connects internally, no auth needed)
         global_rotate_listener = {
             "name": "global-rotate",
             "type": "mixed",
             "port": self.country_ports["GLOBAL"]["rotate"],
-            "listen": "0.0.0.0"
+            "listen": "127.0.0.1"
         }
         global_sticky_listener = {
             "name": "global-sticky",
             "type": "mixed",
             "port": self.country_ports["GLOBAL"]["sticky"],
-            "listen": "0.0.0.0"
+            "listen": "127.0.0.1"
         }
-        if socks5_auth_enabled:
-            global_rotate_listener["users"] = get_listener_users("GLOBAL")
-            global_sticky_listener["users"] = get_listener_users("GLOBAL")
         listeners.append(global_rotate_listener)
         listeners.append(global_sticky_listener)
 
@@ -281,22 +278,19 @@ class CoreManager:
                 "proxies": c_node_names
             })
 
-            # Listeners
+            # Listeners (bind to 127.0.0.1, no auth - SmartProxy handles auth externally)
             c_rotate_listener = {
                 "name": f"{country.lower()}-rotate",
                 "type": "mixed",
                 "port": self.country_ports[country]["rotate"],
-                "listen": "0.0.0.0"
+                "listen": "127.0.0.1"
             }
             c_sticky_listener = {
                 "name": f"{country.lower()}-sticky",
                 "type": "mixed",
                 "port": self.country_ports[country]["sticky"],
-                "listen": "0.0.0.0"
+                "listen": "127.0.0.1"
             }
-            if socks5_auth_enabled:
-                c_rotate_listener["users"] = get_listener_users(country)
-                c_sticky_listener["users"] = get_listener_users(country)
             listeners.append(c_rotate_listener)
             listeners.append(c_sticky_listener)
 
@@ -321,9 +315,8 @@ class CoreManager:
             "rules": rules
         }
 
-        if socks5_auth_enabled:
-            full_yaml["authentication"] = [f"{socks5_username}:{socks5_password}"]
-            full_yaml["skip-auth-prefixes"] = []
+        # Note: No global authentication needed since SmartProxy handles all auth
+        # and internal listeners are bound to 127.0.0.1 only
 
         # Write config.yaml
         with open(self.config_path, "w", encoding="utf-8") as f:
