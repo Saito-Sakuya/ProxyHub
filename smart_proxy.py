@@ -356,10 +356,30 @@ class SmartProxyServer:
         self.active_sessions.pop(session_key, None)
     
     async def _handle_http_forward(self, client_reader, client_writer, first_line, raw_headers, headers, target_port, session_key, country):
-        """Handle plain HTTP proxy forwarding (GET/POST etc) via Mihomo."""
-        logger.debug(f"HTTP forward: {first_line} via Mihomo port {target_port}")
+        """Handle plain HTTP proxy forwarding (GET/POST etc) via SOCKS5 tunnel to Mihomo."""
+        # Parse target host:port from the request URL (e.g. GET http://httpbin.org/ip HTTP/1.1)
+        parts = first_line.split(' ')
+        target_url = parts[1] if len(parts) > 1 else ''
         
-        # Connect to Mihomo mixed port as HTTP proxy
+        # Extract host and port from URL
+        from urllib.parse import urlparse
+        parsed = urlparse(target_url)
+        dest_host = parsed.hostname or ''
+        dest_port = parsed.port or 80
+        
+        if not dest_host:
+            client_writer.write(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+            await client_writer.drain()
+            return
+        
+        # Convert absolute URL to relative path for the forwarded request
+        path = parsed.path or '/'
+        if parsed.query:
+            path += '?' + parsed.query
+        
+        logger.debug(f"HTTP forward: {dest_host}:{dest_port}{path} via Mihomo port {target_port}")
+        
+        # Connect to Mihomo via SOCKS5 tunnel (same approach as CONNECT)
         try:
             clash_reader, clash_writer = await asyncio.open_connection('127.0.0.1', target_port)
         except Exception as e:
@@ -368,19 +388,71 @@ class SmartProxyServer:
             await client_writer.drain()
             return
         
-        # Rebuild request without Proxy-Authorization header
+        try:
+            # SOCKS5 handshake with Mihomo
+            clash_writer.write(bytes([5, 1, 0]))
+            await clash_writer.drain()
+            
+            resp = await clash_reader.readexactly(2)
+            if resp[0] != 5 or resp[1] != 0:
+                raise Exception("Mihomo rejected SOCKS5 handshake")
+            
+            # SOCKS5 CONNECT to target
+            addr_bytes = dest_host.encode('utf-8')
+            clash_writer.write(bytes([5, 1, 0, 3, len(addr_bytes)]) + addr_bytes + dest_port.to_bytes(2, 'big'))
+            await clash_writer.drain()
+            
+            conn_resp = await clash_reader.readexactly(4)
+            if conn_resp[1] != 0:
+                raise Exception(f"Mihomo CONNECT failed with status {conn_resp[1]}")
+            
+            # Read remaining address data
+            c_atyp = conn_resp[3]
+            if c_atyp == 1:
+                await clash_reader.readexactly(6)
+            elif c_atyp == 3:
+                c_len = (await clash_reader.readexactly(1))[0]
+                await clash_reader.readexactly(c_len + 2)
+            elif c_atyp == 4:
+                await clash_reader.readexactly(18)
+                
+        except Exception as e:
+            logger.error(f"Error tunneling HTTP forward via Mihomo: {e}")
+            client_writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+            await client_writer.drain()
+            try:
+                clash_writer.close()
+            except:
+                pass
+            return
+        
+        # Tunnel established - now send the HTTP request through it
+        # Rewrite request line: absolute URL -> relative path
+        method = parts[0]
+        http_ver = parts[2] if len(parts) > 2 else 'HTTP/1.1'
+        new_request_line = f"{method} {path} {http_ver}\r\n".encode('utf-8')
+        
+        # Rebuild headers: remove Proxy-Authorization, ensure Host header exists
         rebuilt_headers = b""
+        has_host = False
         for line in raw_headers.split(b"\r\n"):
             line_str = line.decode('utf-8', errors='ignore').strip()
-            if line_str and not line_str.lower().startswith('proxy-authorization:'):
-                rebuilt_headers += line + b"\r\n"
+            if not line_str:
+                continue
+            if line_str.lower().startswith('proxy-authorization:'):
+                continue
+            if line_str.lower().startswith('host:'):
+                has_host = True
+            rebuilt_headers += line + b"\r\n"
         
-        # Forward the full HTTP request to Mihomo
-        request_line = first_line.encode('utf-8') + b"\r\n"
-        clash_writer.write(request_line + rebuilt_headers + b"\r\n")
+        if not has_host:
+            host_header = f"Host: {dest_host}" + (f":{dest_port}" if dest_port != 80 else "")
+            rebuilt_headers = host_header.encode('utf-8') + b"\r\n" + rebuilt_headers
+        
+        clash_writer.write(new_request_line + rebuilt_headers + b"\r\n")
         await clash_writer.drain()
         
-        # Bidirectional pipe (Mihomo handles the HTTP request and returns response)
+        # Bidirectional pipe
         await asyncio.gather(
             self.pipe(client_reader, clash_writer, session_key, country, "tx"),
             self.pipe(clash_reader, client_writer, session_key, country, "rx"),
