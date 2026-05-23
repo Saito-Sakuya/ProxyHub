@@ -1,5 +1,5 @@
 <p align="center">
-  <h1 align="center">🌐 ProxyHub</h1>
+  <h1 align="center">ProxyHub</h1>
   <p align="center">
     <b>统一代理池管理与智能路由系统</b><br/>
     <i>Unified Proxy Pool Manager & Smart Router</i>
@@ -15,23 +15,23 @@
 
 ---
 
-## ✨ 功能特性 / Features
+## Features
 
-- 🔄 **多订阅聚合** — 支持 Clash/V2Ray/Trojan 等多种格式订阅链接，同时支持直接粘贴节点文本
-- 🌍 **按国家/地区自动分组** — 智能识别节点所属国家，自动分配独立端口池
-- 🎯 **双重负载均衡策略**
+- **多订阅聚合** — 支持 Clash/V2Ray/Trojan 等多种格式订阅链接，同时支持直接粘贴节点文本
+- **按国家/地区自动分组** — 智能识别节点所属国家，自动分配独立端口池
+- **双重负载均衡策略**
   - `Rotate` (轮询) — 每个连接轮流使用不同节点，实现流量负载均衡
   - `Sticky` (粘性) — 基于一致性哈希，同一目标地址始终走同一节点，保持会话稳定
-- 🔐 **VPS 安全防护** — 部署到服务器时自动启用 TOTP 双因子认证 + IP 封禁机制
-- 📊 **实时 Web 仪表盘** — 精美 Glassmorphism 风格 UI，实时监控节点状态、流量、会话
-- 🔑 **按国家独立凭据** — 不同国家/地区端口可设置不同的用户名和密码
-- ⏱️ **自动定时同步** — 可配置订阅自动刷新间隔
-- 🐳 **Docker 一键部署** — 提供 Dockerfile 和 docker-compose，开箱即用
-- 💻 **Windows EXE 打包** — 支持 PyInstaller 编译为单文件可执行程序
+- **VPS 安全防护** — 部署到服务器时自动启用 TOTP 双因子认证 + IP 封禁机制
+- **实时 Web 仪表盘** — Glassmorphism 风格 UI，实时监控节点状态、流量、会话
+- **按国家独立凭据** — 不同国家/地区端口可设置不同的用户名和密码
+- **自动定时同步** — 可配置订阅自动刷新间隔
+- **Docker 一键部署** — 提供 Dockerfile 和 docker-compose，开箱即用
+- **Windows EXE 打包** — 支持 PyInstaller 编译为单文件可执行程序
 
 ---
 
-## 🏗️ 系统架构 / Architecture
+## Architecture
 
 ```
 客户端 (Client)
@@ -66,7 +66,7 @@
 
 ---
 
-## 🚀 快速开始 / Quick Start
+## Quick Start
 
 ### 方式一：Docker 部署 (推荐)
 
@@ -110,7 +110,7 @@ dist/ProxyHub.exe
 
 ---
 
-## 📡 端口说明 / Ports
+## Ports
 
 | 端口 | 用途 | 说明 |
 |------|------|------|
@@ -119,7 +119,7 @@ dist/ProxyHub.exe
 
 ---
 
-## 🔑 代理连接方式 / Proxy Connection
+## Proxy Connection
 
 ### SOCKS5 协议
 
@@ -157,7 +157,7 @@ curl -x http://user:pass@your-server:1080 http://httpbin.org/ip
 
 ---
 
-## ⚙️ 配置说明 / Configuration
+## Configuration
 
 首次启动前，请将 `config.json` 中的订阅链接替换为你自己的：
 
@@ -189,20 +189,20 @@ curl -x http://user:pass@your-server:1080 http://httpbin.org/ip
 
 ---
 
-## 🔒 安全特性 / Security
+## Security
 
 ### VPS 模式 (Linux)
-- ✅ 自动启用 **TOTP 双因子认证**（Google Authenticator / Microsoft Authenticator）
-- ✅ 首次启动时在终端日志中输出 2FA 密钥和 otpauth:// URI
-- ✅ 所有 API 接口需携带有效 Token
-- ✅ 登录失败 5 次自动 **IP 封禁 15 分钟**
+- 自动启用 **TOTP 双因子认证**（Google Authenticator / Microsoft Authenticator）
+- 首次启动时在终端日志中输出 2FA 密钥和 otpauth:// URI
+- 所有 API 接口需携带有效 Token
+- 登录失败 5 次自动 **IP 封禁 15 分钟**
 
 ### 本地模式 (Windows)
 - 开发调试用，跳过认证直接访问面板
 
 ---
 
-## 🛠️ 技术栈 / Tech Stack
+## Tech Stack
 
 - **后端**: Python 3.10+ / FastAPI / Uvicorn / asyncio
 - **代理引擎**: [Mihomo](https://github.com/MetaCubeX/mihomo) (Clash Meta Fork)
@@ -212,7 +212,7 @@ curl -x http://user:pass@your-server:1080 http://httpbin.org/ip
 
 ---
 
-## 📁 项目结构 / Project Structure
+## Project Structure
 
 ```
 ProxyHub/
@@ -234,13 +234,13 @@ ProxyHub/
 
 ---
 
-## 📜 License
+## License
 
 [MIT License](LICENSE)
 
 ---
 
-## ⚠️ 免责声明 / Disclaimer
+## Disclaimer
 
 本项目仅供学习与研究使用。用户需自行承担使用本软件的一切风险和法律责任。请遵守当地法律法规。
 
