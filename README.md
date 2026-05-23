@@ -35,17 +35,19 @@
 
 ```
 客户端 (Client)
-    │
+    │  SOCKS5 或 HTTP 代理协议（自动识别）
     ▼
 ┌─────────────────────────────────────────┐
-│  SOCKS5 Smart Entry (Port 1080)         │  ← 统一智能入口
+│  Smart Proxy Entry (Port 1080)          │  ← 统一智能入口
+│  自动检测协议: SOCKS5 / HTTP CONNECT    │
 │  解析用户名 → 国家 + 策略 + 会话ID       │
 │  凭据校验 (全局 / 按国家独立)             │
 └─────────────┬───────────────────────────┘
-              │
+              │  内部 SOCKS5 中转
               ▼
 ┌─────────────────────────────────────────┐
 │  Mihomo/Clash Core (Ports 20000+)       │  ← 后端代理引擎
+│  绑定 127.0.0.1，仅内部访问              │
 │                                         │
 │  ┌─────────┐  ┌─────────┐              │
 │  │ GLOBAL  │  │   HK    │  ...         │
@@ -70,7 +72,7 @@
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/YOUR_USERNAME/ProxyHub.git
+git clone https://github.com/Saito-Sakuya/ProxyHub.git
 cd ProxyHub
 
 # 2. 复制并编辑配置文件
@@ -112,15 +114,32 @@ dist/ProxyHub.exe
 
 | 端口 | 用途 | 说明 |
 |------|------|------|
-| `8000` | Web Dashboard | 管理面板 |
-| `1080` | SOCKS5 Smart Entry | 统一代理智能入口 |
-| `20000+` | Country Port Pool | 按国家分配的内部端口池 |
+| `8000` | Web Dashboard | 管理面板（建议仅本地/SSH 隧道访问） |
+| `1080` | Smart Proxy Entry | 统一代理入口，自动识别 SOCKS5 / HTTP 协议 |
 
 ---
 
-## 🔑 SOCKS5 用户名路由格式 / Username Routing
+## 🔑 代理连接方式 / Proxy Connection
 
-通过连接到智能入口 (1080 端口) 时设置的 SOCKS5 用户名，可以指定路由目标：
+### SOCKS5 协议
+
+```bash
+curl -x socks5://user:pass@your-server:1080 https://httpbin.org/ip
+```
+
+### HTTP 协议
+
+```bash
+# HTTPS 站点（HTTP CONNECT 隧道）
+curl -x http://user:pass@your-server:1080 https://httpbin.org/ip
+
+# HTTP 站点（直接转发）
+curl -x http://user:pass@your-server:1080 http://httpbin.org/ip
+```
+
+### 用户名路由格式
+
+通过连接智能入口 (1080 端口) 时设置的用户名，可以指定路由目标：
 
 | 用户名格式 | 路由结果 | 说明 |
 |------------|----------|------|
@@ -130,7 +149,7 @@ dist/ProxyHub.exe
 | `JP-sticky-sess123` | `JP` + `sticky` | 日本粘性 + 自定义会话ID |
 | `rotate` | `GLOBAL` + `rotate` | 全局轮询 |
 
-**如果启用了 SOCKS5 认证：**
+**如果启用了代理认证：**
 
 用户名格式为 `[认证用户名]-[国家]-[策略]-[会话ID]`
 
@@ -158,10 +177,10 @@ dist/ProxyHub.exe
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `smart_port` | `1080` | SOCKS5 智能入口监听端口 |
+| `smart_port` | `1080` | 智能代理入口端口（SOCKS5 / HTTP 自动识别） |
 | `dashboard_port` | `8000` | Web 管理面板端口 |
 | `port_pool_start` | `20000` | 国家端口池起始端口 |
-| `socks5_auth.enabled` | `false` | 是否启用 SOCKS5 认证 |
+| `socks5_auth.enabled` | `false` | 是否启用代理认证（对 SOCKS5 和 HTTP 均生效） |
 | `sticky_session_ttl_minutes` | `30` | 粘性会话超时清理时间（分钟） |
 | `auto_update_interval_hours` | `12` | 订阅自动刷新间隔（小时） |
 | `alarm_threshold_percent` | `50` | 节点健康率告警阈值（%） |
@@ -199,7 +218,7 @@ dist/ProxyHub.exe
 ProxyHub/
 ├── main.py                 # FastAPI 主应用 & API 路由
 ├── core_manager.py         # Mihomo 核心管理（下载/配置生成/启停）
-├── smart_proxy.py          # SOCKS5 智能入口代理服务
+├── smart_proxy.py          # 智能入口代理（SOCKS5 + HTTP 双协议自动识别）
 ├── parse_sub.py            # 订阅链接解析（Clash/V2Ray/Trojan/文本）
 ├── config.json             # 运行时配置文件（不提交到 Git）
 ├── requirements.txt        # Python 依赖
