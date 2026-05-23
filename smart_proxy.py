@@ -127,20 +127,275 @@ class SmartProxyServer:
         return country, strategy, session_id
 
     async def handle_connection(self, client_reader, client_writer):
-        """Handle incoming SOCKS5 client connection."""
+        """Handle incoming connection - auto-detect SOCKS5 vs HTTP proxy."""
         self.active_connections += 1
         peer = client_writer.get_extra_info('peername')
         logger.debug(f"New connection from {peer}")
 
         try:
-            # 1. SOCKS5 Handshake / Method Selection
-            header = await client_reader.readexactly(2)
-            version, nmethods = header[0], header[1]
+            # Read first byte to detect protocol
+            first_byte = await client_reader.readexactly(1)
             
-            if version != 5:
-                logger.warning(f"Unsupported SOCKS version: {version}")
+            if first_byte[0] == 5:
+                # SOCKS5 protocol
+                await self._handle_socks5(client_reader, client_writer, first_byte)
+            elif first_byte[0] in (ord('C'), ord('G'), ord('P'), ord('H'), ord('D'), ord('O'), ord('T')):
+                # HTTP method detected (CONNECT, GET, POST, HEAD, DELETE, OPTIONS, TRACE/PUT)
+                await self._handle_http_proxy(client_reader, client_writer, first_byte)
+            else:
+                logger.warning(f"Unsupported protocol, first byte: {first_byte[0]}")
                 client_writer.close()
                 return
+        except asyncio.CancelledError:
+            pass
+        except asyncio.IncompleteReadError:
+            pass
+        except Exception as e:
+            logger.error(f"Error in connection handler: {e}")
+        finally:
+            self.active_connections -= 1
+            try:
+                client_writer.close()
+                await client_writer.wait_closed()
+            except:
+                pass
+
+    # ==================== HTTP PROXY HANDLER ====================
+
+    async def _handle_http_proxy(self, client_reader, client_writer, first_byte):
+        """Handle HTTP proxy requests (CONNECT tunnel & plain HTTP forward)."""
+        # Read the rest of the first line
+        rest_of_line = await client_reader.readline()
+        first_line = (first_byte + rest_of_line).decode('utf-8', errors='ignore').strip()
+        
+        # Parse: METHOD target HTTP/1.x
+        parts = first_line.split(' ')
+        if len(parts) < 3:
+            client_writer.write(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+            await client_writer.drain()
+            return
+        
+        method = parts[0].upper()
+        target = parts[1]
+        http_version = parts[2]
+        
+        # Read all headers
+        headers = {}
+        raw_headers = b""
+        while True:
+            line = await client_reader.readline()
+            raw_headers += line
+            line_str = line.decode('utf-8', errors='ignore').strip()
+            if not line_str:
+                break
+            if ':' in line_str:
+                key, val = line_str.split(':', 1)
+                headers[key.strip().lower()] = val.strip()
+        
+        # Extract auth from Proxy-Authorization header
+        username = None
+        auth_config = self.config.get("socks5_auth", {})
+        auth_enabled = auth_config.get("enabled", False)
+        auth_username = auth_config.get("username", "")
+        auth_password = auth_config.get("password", "anypassword")
+        
+        if auth_enabled:
+            proxy_auth = headers.get('proxy-authorization', '')
+            if not proxy_auth:
+                client_writer.write(b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"ProxyHub\"\r\n\r\n")
+                await client_writer.drain()
+                return
+            
+            try:
+                import base64
+                scheme, cred_b64 = proxy_auth.split(' ', 1)
+                cred = base64.b64decode(cred_b64).decode('utf-8', errors='ignore')
+                cred_user, cred_pass = cred.split(':', 1)
+            except Exception:
+                client_writer.write(b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"ProxyHub\"\r\n\r\n")
+                await client_writer.drain()
+                return
+            
+            # Determine country from username for per-country credentials
+            requested_country = "GLOBAL"
+            match = re.search(r'(?:^|-)(GLOBAL|Others|[A-Z]{2})-(rotate|sticky)(?:-|$)', cred_user, re.IGNORECASE)
+            if match:
+                requested_country = match.group(1).upper()
+            
+            port_credentials = self.config.get("port_credentials", {})
+            c_creds = port_credentials.get(requested_country, {})
+            c_u = c_creds.get("username", "").strip()
+            c_p = c_creds.get("password", "")
+            
+            expected_user_prefix = c_u if c_u else auth_username
+            expected_password = c_p if c_p else auth_password
+            
+            if cred_pass != expected_password:
+                logger.warning(f"HTTP Proxy auth failed for user {cred_user}: password mismatch.")
+                client_writer.write(b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"ProxyHub\"\r\n\r\n")
+                await client_writer.drain()
+                return
+            
+            # Verify username prefix and extract routing info
+            if expected_user_prefix:
+                if cred_user == expected_user_prefix:
+                    username = ""
+                elif cred_user.startswith(expected_user_prefix + "-"):
+                    username = cred_user[len(expected_user_prefix) + 1:]
+                else:
+                    logger.warning(f"HTTP Proxy auth failed: username '{cred_user}' does not match prefix '{expected_user_prefix}'.")
+                    client_writer.write(b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"ProxyHub\"\r\n\r\n")
+                    await client_writer.drain()
+                    return
+            else:
+                username = cred_user
+        else:
+            # No auth - try to extract routing from Proxy-Authorization if provided, else default
+            proxy_auth = headers.get('proxy-authorization', '')
+            if proxy_auth:
+                try:
+                    import base64
+                    scheme, cred_b64 = proxy_auth.split(' ', 1)
+                    cred = base64.b64decode(cred_b64).decode('utf-8', errors='ignore')
+                    username = cred.split(':', 1)[0]
+                except:
+                    username = ""
+            else:
+                username = ""
+        
+        # Parse routing from username
+        country, strategy, session_id = self.parse_username(username)
+        
+        # Session tracking
+        session_key = f"{country}-{strategy}"
+        if session_id:
+            session_key += f"-{session_id}"
+        self.active_sessions[session_key] = asyncio.get_event_loop().time()
+        
+        # Get target Mihomo port
+        target_port = self.get_target_clash_port(country, strategy)
+        
+        if method == 'CONNECT':
+            await self._handle_http_connect(client_reader, client_writer, target, target_port, session_key, country)
+        else:
+            await self._handle_http_forward(client_reader, client_writer, first_line, raw_headers, headers, target_port, session_key, country)
+    
+    async def _handle_http_connect(self, client_reader, client_writer, target, target_port, session_key, country):
+        """Handle HTTP CONNECT tunneling via Mihomo SOCKS5."""
+        # Parse host:port from target
+        if ':' in target:
+            dest_host, dest_port_str = target.rsplit(':', 1)
+            try:
+                dest_port = int(dest_port_str)
+            except ValueError:
+                dest_port = 443
+        else:
+            dest_host = target
+            dest_port = 443
+        
+        logger.debug(f"HTTP CONNECT tunnel: {dest_host}:{dest_port} via Mihomo port {target_port}")
+        
+        # Connect to Mihomo mixed port via SOCKS5
+        try:
+            clash_reader, clash_writer = await asyncio.open_connection('127.0.0.1', target_port)
+        except Exception as e:
+            logger.error(f"Failed to connect to Mihomo port {target_port}: {e}")
+            client_writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+            await client_writer.drain()
+            return
+        
+        try:
+            # SOCKS5 handshake with Mihomo (no auth)
+            clash_writer.write(bytes([5, 1, 0]))
+            await clash_writer.drain()
+            
+            resp = await clash_reader.readexactly(2)
+            if resp[0] != 5 or resp[1] != 0:
+                raise Exception("Mihomo rejected SOCKS5 handshake")
+            
+            # SOCKS5 CONNECT request
+            # atyp=3 (domain), addr, port
+            addr_bytes = dest_host.encode('utf-8')
+            clash_writer.write(bytes([5, 1, 0, 3, len(addr_bytes)]) + addr_bytes + dest_port.to_bytes(2, 'big'))
+            await clash_writer.drain()
+            
+            conn_resp = await clash_reader.readexactly(4)
+            if conn_resp[1] != 0:
+                raise Exception(f"Mihomo CONNECT failed with status {conn_resp[1]}")
+            
+            # Read remaining address data from response
+            c_atyp = conn_resp[3]
+            if c_atyp == 1:
+                await clash_reader.readexactly(6)
+            elif c_atyp == 3:
+                c_len = (await clash_reader.readexactly(1))[0]
+                await clash_reader.readexactly(c_len + 2)
+            elif c_atyp == 4:
+                await clash_reader.readexactly(18)
+            
+        except Exception as e:
+            logger.error(f"Error tunneling via Mihomo: {e}")
+            client_writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+            await client_writer.drain()
+            try:
+                clash_writer.close()
+            except:
+                pass
+            return
+        
+        # Success - tell client tunnel is established
+        client_writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        await client_writer.drain()
+        
+        # Bidirectional pipe
+        await asyncio.gather(
+            self.pipe(client_reader, clash_writer, session_key, country, "tx"),
+            self.pipe(clash_reader, client_writer, session_key, country, "rx"),
+            return_exceptions=True
+        )
+        self.active_sessions.pop(session_key, None)
+    
+    async def _handle_http_forward(self, client_reader, client_writer, first_line, raw_headers, headers, target_port, session_key, country):
+        """Handle plain HTTP proxy forwarding (GET/POST etc) via Mihomo."""
+        logger.debug(f"HTTP forward: {first_line} via Mihomo port {target_port}")
+        
+        # Connect to Mihomo mixed port as HTTP proxy
+        try:
+            clash_reader, clash_writer = await asyncio.open_connection('127.0.0.1', target_port)
+        except Exception as e:
+            logger.error(f"Failed to connect to Mihomo port {target_port}: {e}")
+            client_writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+            await client_writer.drain()
+            return
+        
+        # Rebuild request without Proxy-Authorization header
+        rebuilt_headers = b""
+        for line in raw_headers.split(b"\r\n"):
+            line_str = line.decode('utf-8', errors='ignore').strip()
+            if line_str and not line_str.lower().startswith('proxy-authorization:'):
+                rebuilt_headers += line + b"\r\n"
+        
+        # Forward the full HTTP request to Mihomo
+        request_line = first_line.encode('utf-8') + b"\r\n"
+        clash_writer.write(request_line + rebuilt_headers + b"\r\n")
+        await clash_writer.drain()
+        
+        # Bidirectional pipe (Mihomo handles the HTTP request and returns response)
+        await asyncio.gather(
+            self.pipe(client_reader, clash_writer, session_key, country, "tx"),
+            self.pipe(clash_reader, client_writer, session_key, country, "rx"),
+            return_exceptions=True
+        )
+        self.active_sessions.pop(session_key, None)
+    
+    # ==================== SOCKS5 HANDLER ====================
+    
+    async def _handle_socks5(self, client_reader, client_writer, first_byte):
+        """Handle SOCKS5 proxy connection (original flow)."""
+        try:
+            # We already read the version byte (0x05), now read nmethods
+            nmethods_byte = await client_reader.readexactly(1)
+            nmethods = nmethods_byte[0]
 
             methods = await client_reader.readexactly(nmethods)
             
@@ -152,17 +407,14 @@ class SmartProxyServer:
             username = None
             if auth_enabled:
                 if 2 not in methods:
-                    # Require Auth, but client doesn't support it
                     client_writer.write(bytes([5, 0xFF]))
                     await client_writer.drain()
                     client_writer.close()
                     return
                 
-                # Accept Username/Password Auth
                 client_writer.write(bytes([5, 2]))
                 await client_writer.drain()
                 
-                # Auth Subnegotiation
                 sub_ver = await client_reader.readexactly(1)
                 if sub_ver[0] != 1:
                     client_writer.close()
@@ -176,11 +428,9 @@ class SmartProxyServer:
                 p_bytes = await client_reader.readexactly(p_len)
                 password = p_bytes.decode('utf-8', errors='ignore')
                 
-                # To support per-country credentials, we determine the country code from the requested username
                 requested_country = "GLOBAL"
                 temp_user = username
                 
-                # Check for standard suffix patterns: -rotate or -sticky
                 match = re.search(r'(?:^|-)(GLOBAL|Others|[A-Z]{2})-(rotate|sticky)(?:-|$)', temp_user, re.IGNORECASE)
                 if match:
                     requested_country = match.group(1).upper()
@@ -189,7 +439,6 @@ class SmartProxyServer:
                     if len(parts) > 0 and len(parts[0]) == 2 and parts[0].isupper():
                         requested_country = parts[0]
                 
-                # Retrieve country-specific credentials with fallback to global default
                 port_credentials = self.config.get("port_credentials", {})
                 c_creds = port_credentials.get(requested_country, {})
                 c_u = c_creds.get("username", "").strip()
@@ -200,19 +449,15 @@ class SmartProxyServer:
                 
                 if password != expected_password:
                     logger.warning(f"SOCKS5 Auth failed for user {username}: password mismatch.")
-                    # Auth failure status (0x01 status != 0x00, e.g. 0x01)
                     client_writer.write(bytes([1, 1]))
                     await client_writer.drain()
                     client_writer.close()
                     return
                 
-                # Verify custom username if specified
                 if expected_user_prefix:
                     if username == expected_user_prefix:
-                        # Exact match, default routing (GLOBAL-rotate)
                         username = ""
                     elif username.startswith(expected_user_prefix + "-"):
-                        # Custom username prefix matches, strip prefix for routing
                         username = username[len(expected_user_prefix) + 1:]
                     else:
                         logger.warning(f"SOCKS5 Auth failed: username '{username}' does not match expected prefix '{expected_user_prefix}'.")
@@ -221,11 +466,9 @@ class SmartProxyServer:
                         client_writer.close()
                         return
 
-                # Auth success (0x01 status 0x00)
                 client_writer.write(bytes([1, 0]))
                 await client_writer.drain()
             else:
-                # Auth is NOT enabled. Support both No Auth (0x00) and Username/Password (0x02)
                 if 0 in methods:
                     client_writer.write(bytes([5, 0]))
                     await client_writer.drain()
@@ -256,37 +499,33 @@ class SmartProxyServer:
             # Parse route from username
             country, strategy, session_id = self.parse_username(username)
             
-            # Session Tracking for Dashboard
             session_key = f"{country}-{strategy}"
             if session_id:
                 session_key += f"-{session_id}"
-            
-            # Register active session with last active timestamp
             self.active_sessions[session_key] = asyncio.get_event_loop().time()
 
-            # 2. Connection Request
+            # Connection Request
             req_header = await client_reader.readexactly(4)
             cmd, atyp = req_header[1], req_header[3]
             
-            if cmd != 1: # Only CONNECT supported
-                client_writer.write(bytes([5, 7, 0, 1, 0, 0, 0, 0, 0, 0])) # Command not supported
+            if cmd != 1:
+                client_writer.write(bytes([5, 7, 0, 1, 0, 0, 0, 0, 0, 0]))
                 await client_writer.drain()
                 client_writer.close()
                 return
 
-            # Read target address and port
-            if atyp == 1: # IPv4
+            if atyp == 1:
                 addr_bytes = await client_reader.readexactly(4)
                 dest_addr = socket.inet_ntoa(addr_bytes)
-            elif atyp == 3: # Domain Name
+            elif atyp == 3:
                 addr_len = (await client_reader.readexactly(1))[0]
                 addr_bytes = await client_reader.readexactly(addr_len)
                 dest_addr = addr_bytes.decode('utf-8', errors='ignore')
-            elif atyp == 4: # IPv6
+            elif atyp == 4:
                 addr_bytes = await client_reader.readexactly(16)
                 dest_addr = socket.inet_ntop(socket.AF_INET6, addr_bytes)
             else:
-                client_writer.write(bytes([5, 8, 0, 1, 0, 0, 0, 0, 0, 0])) # Address type not supported
+                client_writer.write(bytes([5, 8, 0, 1, 0, 0, 0, 0, 0, 0]))
                 await client_writer.drain()
                 client_writer.close()
                 return
@@ -294,35 +533,32 @@ class SmartProxyServer:
             port_bytes = await client_reader.readexactly(2)
             dest_port = int.from_bytes(port_bytes, 'big')
 
-            # 3. Connect to local Clash listener port for this country/strategy
             target_port = self.get_target_clash_port(country, strategy)
             
-            logger.debug(f"Routing session {username} to Clash port {target_port} -> {dest_addr}:{dest_port}")
+            logger.debug(f"SOCKS5 routing {username} to Mihomo port {target_port} -> {dest_addr}:{dest_port}")
 
             try:
                 clash_reader, clash_writer = await asyncio.open_connection('127.0.0.1', target_port)
             except Exception as e:
-                logger.error(f"Failed to connect to local Clash port {target_port}: {e}")
-                client_writer.write(bytes([5, 3, 0, 1, 0, 0, 0, 0, 0, 0])) # Network unreachable
+                logger.error(f"Failed to connect to Mihomo port {target_port}: {e}")
+                client_writer.write(bytes([5, 3, 0, 1, 0, 0, 0, 0, 0, 0]))
                 await client_writer.drain()
                 client_writer.close()
                 return
 
-            # 4. Perform SOCKS5 handshake with Clash mixed port
             try:
-                clash_writer.write(bytes([5, 1, 0])) # SOCKS5, 1 method: No Auth
+                clash_writer.write(bytes([5, 1, 0]))
                 await clash_writer.drain()
                 
                 clash_resp = await clash_reader.readexactly(2)
                 if clash_resp[0] != 5 or clash_resp[1] != 0:
-                    raise Exception("Clash rejected SOCKS5 handshake")
+                    raise Exception("Mihomo rejected SOCKS5 handshake")
 
-                # Send connection request to Clash
                 clash_writer.write(bytes([5, 1, 0, atyp]) + addr_bytes + port_bytes)
                 await clash_writer.drain()
                 
                 clash_conn_resp = await clash_reader.readexactly(4)
-                if clash_conn_resp[1] != 0: # Connection failed
+                if clash_conn_resp[1] != 0:
                     status = clash_conn_resp[1]
                     client_writer.write(bytes([5, status, 0, 1, 0, 0, 0, 0, 0, 0]))
                     await client_writer.drain()
@@ -330,29 +566,26 @@ class SmartProxyServer:
                     client_writer.close()
                     return
 
-                # Read remaining address info from Clash response to clear the buffer
                 c_atyp = clash_conn_resp[3]
                 if c_atyp == 1:
-                    await clash_reader.readexactly(6) # 4 bytes IP + 2 bytes port
+                    await clash_reader.readexactly(6)
                 elif c_atyp == 3:
                     c_len = (await clash_reader.readexactly(1))[0]
                     await clash_reader.readexactly(c_len + 2)
                 elif c_atyp == 4:
-                    await clash_reader.readexactly(18) # 16 bytes IPv6 + 2 bytes port
+                    await clash_reader.readexactly(18)
 
             except Exception as e:
-                logger.error(f"Error handshaking with Clash: {e}")
-                client_writer.write(bytes([5, 1, 0, 1, 0, 0, 0, 0, 0, 0])) # General failure
+                logger.error(f"Error handshaking with Mihomo: {e}")
+                client_writer.write(bytes([5, 1, 0, 1, 0, 0, 0, 0, 0, 0]))
                 await client_writer.drain()
                 clash_writer.close()
                 client_writer.close()
                 return
 
-            # 5. Success! Reply to original client
-            client_writer.write(bytes([5, 0, 0, 1, 0, 0, 0, 0, 0, 0])) # Success
+            client_writer.write(bytes([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]))
             await client_writer.drain()
 
-            # 6. Pipe data bi-directionally
             await asyncio.gather(
                 self.pipe(client_reader, clash_writer, session_key, country, "tx"),
                 self.pipe(clash_reader, client_writer, session_key, country, "rx"),
@@ -361,17 +594,11 @@ class SmartProxyServer:
             
             self.active_sessions.pop(session_key, None)
 
-        except asyncio.CancelledError:
+        except asyncio.IncompleteReadError:
             pass
         except Exception as e:
             logger.error(f"Error in SOCKS5 handler: {e}")
-        finally:
-            self.active_connections -= 1
-            try:
-                client_writer.close()
-                await client_writer.wait_closed()
-            except:
-                pass
+
 
     def get_target_clash_port(self, country: str, strategy: str) -> int:
         """Find corresponding local port from core manager mappings."""

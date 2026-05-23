@@ -297,11 +297,9 @@ async function fetchLogs() {
     const lines = await fetchAPI('logs');
     if (lines && lines.length > 0) {
         lines.forEach(line => {
-            // Append if it's new log
             const div = document.createElement('div');
             div.className = 'terminal-line';
             
-            // Syntax Highlight based on content tags
             if (line.includes('[System]')) {
                 div.className += ' log-sys';
             } else if (line.includes('[Mihomo]')) {
@@ -315,6 +313,12 @@ async function fetchLogs() {
             div.textContent = line;
             terminal.appendChild(div);
         });
+        
+        // Cap DOM elements to prevent memory leak
+        const MAX_LOG_LINES = 500;
+        while (terminal.children.length > MAX_LOG_LINES) {
+            terminal.removeChild(terminal.firstChild);
+        }
         
         if (chkAutoScroll.checked) {
             terminal.scrollTop = terminal.scrollHeight;
@@ -677,11 +681,19 @@ function updateSessionsTable() {
     }
     
     activeSessions.forEach(session => {
-        // session e.g. "US-sticky-sess123"
-        const parts = session.split('-');
-        const country = parts[0] || 'GLOBAL';
-        const strategy = parts[1] || 'sticky';
-        const sessId = parts.slice(2).join('-') || '未指定';
+        // Parse session key format: COUNTRY-strategy[-sessionId]
+        // e.g. "US-sticky-sess_abc123", "GLOBAL-rotate", "HK-sticky-my-session"
+        const match = session.match(/^([A-Z]+)-(rotate|sticky)(?:-(.+))?$/);
+        let country, strategy, sessId;
+        if (match) {
+            country = match[1];
+            strategy = match[2];
+            sessId = match[3] || '默认';
+        } else {
+            country = 'GLOBAL';
+            strategy = 'rotate';
+            sessId = session || '未指定';
+        }
         
         const tr = document.createElement('tr');
         tr.innerHTML = `
@@ -711,7 +723,7 @@ btnSync.addEventListener('click', async () => {
         isSyncing = true;
         pollStatus();
     } else {
-        alert('发同步同步失败：' + (res ? res.message : '未知网络错误'));
+        alert('发起同步失败：' + (res ? res.message : '未知网络错误'));
         btnSync.disabled = false;
         syncBtnText.textContent = '同步机场配置';
     }
@@ -1566,9 +1578,8 @@ function updateGeneratedProxyLink() {
     const genSessionId = document.getElementById('genSessionId').value.trim();
     const genCountry = document.getElementById('genCountry').value;
     
-    // Get username & password from settings
     const globalAuthUser = (configData && configData.socks5_auth && configData.socks5_auth.username) || '';
-    const globalAuthPass = (configData && configData.socks5_auth && configData.socks5_auth.password) || 'anypass';
+    const globalAuthPass = (configData && configData.socks5_auth && configData.socks5_auth.password) || '';
     const authEnabled = (configData && configData.socks5_auth && configData.socks5_auth.enabled) || false;
     const smartPort = (configData && configData.smart_port) || 1080;
     
@@ -1582,31 +1593,38 @@ function updateGeneratedProxyLink() {
     const resolvedUserPrefix = c_u || globalAuthUser;
     const resolvedPassword = c_p || globalAuthPass;
     
-    // Construct Username
-    // Format: [country]-[strategy]-[session_id]
-    let user = '';
-    
+    // Construct routing part of username
+    let routePart = '';
     if (genCountry === 'GLOBAL') {
-        user = genMode === 'sticky' ? `GLOBAL-sticky-${genSessionId || 'sess'}` : 'GLOBAL-rotate';
+        routePart = genMode === 'sticky' ? `GLOBAL-sticky-${genSessionId || 'sess'}` : 'GLOBAL-rotate';
     } else {
-        user = genMode === 'sticky' ? `${genCountry}-sticky-${genSessionId || 'sess'}` : `${genCountry}-rotate`;
+        routePart = genMode === 'sticky' ? `${genCountry}-sticky-${genSessionId || 'sess'}` : `${genCountry}-rotate`;
     }
     
+    // Build full username: prefix-route (auth enabled) or just route (no auth)
+    let user = '';
     if (authEnabled && resolvedUserPrefix) {
-        user = `${resolvedUserPrefix}-${user}`;
+        user = `${resolvedUserPrefix}-${routePart}`;
+    } else {
+        user = routePart;
     }
     
     const currentHost = window.location.hostname || '127.0.0.1';
     
     // Generate URL Result
-    const proxyUrl = `${genProto}://${user}:${resolvedPassword}@${currentHost}:${smartPort}`;
+    let proxyUrl = '';
+    if (authEnabled && resolvedPassword) {
+        proxyUrl = `${genProto}://${user}:${resolvedPassword}@${currentHost}:${smartPort}`;
+    } else {
+        proxyUrl = `${genProto}://${user}:anypass@${currentHost}:${smartPort}`;
+    }
     document.getElementById('genUrlResult').textContent = proxyUrl;
     
     // Generate Split Fields
     document.getElementById('genSplitProto').textContent = genProto;
     document.getElementById('genSplitPort').textContent = smartPort;
     document.getElementById('genSplitUser').textContent = user;
-    document.getElementById('genSplitPass').textContent = resolvedPassword;
+    document.getElementById('genSplitPass').textContent = authEnabled ? resolvedPassword : '(任意值)';
     
     // Generate Curl Result
     document.getElementById('genCurlResult').textContent = `curl -x "${proxyUrl}" https://ipinfo.io`;

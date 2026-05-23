@@ -157,20 +157,6 @@ class CoreManager:
         if not socks5_username:
             socks5_username = "admin"
 
-        # Per-country port credentials
-        port_credentials = self.config.get("port_credentials", {})
-
-        def get_listener_users(country_key: str) -> list:
-            if not socks5_auth_enabled:
-                return []
-            c_creds = port_credentials.get(country_key, {})
-            c_u = c_creds.get("username", "").strip()
-            c_p = c_creds.get("password", "")
-            
-            resolved_u = c_u if c_u else socks5_username
-            resolved_p = c_p if c_p else socks5_password
-            return [{"username": resolved_u, "password": resolved_p}]
-
         if not active_nodes:
             logger.warning("No active/enabled nodes available to generate Clash config.")
             return {}

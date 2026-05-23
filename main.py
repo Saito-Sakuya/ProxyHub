@@ -3,6 +3,7 @@ import json
 import asyncio
 import logging
 import urllib.parse
+import re
 import aiohttp
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -613,7 +614,6 @@ class SystemSettingsReq(BaseModel):
     dashboard_username: str = "admin"
     dashboard_password: str = "admin"
 
-import re
 URL_SAFE_PATTERN = re.compile(r'^[A-Za-z0-9\-_.]*$')
 
 def validate_credential_safe(value: str, field_name: str):

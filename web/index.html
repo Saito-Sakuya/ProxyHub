@@ -464,9 +464,9 @@
                         <!-- Port Settings (2 columns) -->
                         <div class="form-row-2">
                             <div class="form-group">
-                                <label for="settingSmartPort">智能 SOCKS5 入口端口</label>
+                                <label for="settingSmartPort">智能代理入口端口 (SOCKS5 / HTTP)</label>
                                 <input type="number" id="settingSmartPort" placeholder="1080">
-                                <span class="help-text">所有软件接入该端口实现动态轮换/粘滞分流（默认 1080）</span>
+                                <span class="help-text">统一代理入口，自动识别 SOCKS5 与 HTTP 协议，支持动态轮换/粘滞分流（默认 1080）</span>
                             </div>
                             <div class="form-group">
                                 <label for="settingPortPoolStart">Clash 物理起始端口池</label>
