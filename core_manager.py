@@ -13,6 +13,13 @@ import shutil
 logger = logging.getLogger("CoreManager")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
+# Proxy types supported by Mihomo v1.19.25
+SUPPORTED_PROXY_TYPES = {
+    "ss", "ssr", "vmess", "vless", "trojan", "hysteria", "hysteria2",
+    "tuic", "wireguard", "http", "socks5", "snell", "anytls",
+    "ssh", "mieru",
+}
+
 class CoreManager:
     def __init__(self, workspace_dir: str, config: dict):
         self.workspace_dir = workspace_dir
@@ -34,6 +41,9 @@ class CoreManager:
         self.log_queue = queue.Queue(maxsize=1000)
         self.is_running = False
         self.log_thread = None
+        self._graceful_stop = False  # True when stop() is called intentionally
+        self._restart_count = 0
+        self._last_restart_time = 0
 
         # Ensure bin dir exists
         os.makedirs(self.bin_dir, exist_ok=True)
@@ -142,6 +152,22 @@ class CoreManager:
             self.add_log(f"[ERROR] Extraction failed: {e}")
             return False
 
+    def _dedup_nodes(self, nodes: list) -> list:
+        """Deduplicate nodes by (server, port) pair. Keep only one per unique endpoint."""
+        seen = set()
+        deduped = []
+        for node in nodes:
+            key = (node.get("server", ""), node.get("port", 0))
+            if key not in seen:
+                seen.add(key)
+                deduped.append(node)
+            else:
+                logger.debug(f"Dedup: skipping duplicate node '{node.get('name', '?')}' at {key[0]}:{key[1]}")
+        if len(nodes) != len(deduped):
+            logger.info(f"Node dedup: {len(nodes)} -> {len(deduped)} (removed {len(nodes) - len(deduped)} duplicates)")
+            self.add_log(f"[System] Deduplicated nodes: {len(nodes)} -> {len(deduped)}")
+        return deduped
+
     def generate_config(self, nodes: list) -> dict:
         """
         Dynamically generate Clash config.yaml based on parsed nodes.
@@ -149,6 +175,23 @@ class CoreManager:
         """
         # Filter only enabled nodes
         active_nodes = [node for node in nodes if node.get("_enabled", True) is not False]
+
+        # Filter out unsupported proxy types to prevent Mihomo startup failure
+        before_filter = len(active_nodes)
+        filtered_nodes = []
+        for node in active_nodes:
+            ptype = node.get("type", "").lower()
+            if ptype in SUPPORTED_PROXY_TYPES:
+                filtered_nodes.append(node)
+            else:
+                logger.warning(f"Filtering unsupported proxy type '{ptype}': {node.get('name', '?')}")
+                self.add_log(f"[System] Skipped unsupported proxy type '{ptype}': {node.get('name', '?')}")
+        active_nodes = filtered_nodes
+        if before_filter != len(active_nodes):
+            logger.info(f"Proxy type filter: {before_filter} -> {len(active_nodes)} nodes")
+
+        # Deduplicate nodes by (server, port)
+        active_nodes = self._dedup_nodes(active_nodes)
 
         socks5_cfg = self.config.get("socks5_auth", {})
         socks5_auth_enabled = socks5_cfg.get("enabled", False)
@@ -201,23 +244,33 @@ class CoreManager:
         listeners = []
         rules = []
 
+        # Health check parameters (hardened)
+        hc_url = self.config.get("check_url", "http://www.gstatic.com/generate_204")
+        hc_interval = self.config.get("check_interval_seconds", 120)
+        hc_params = {
+            "url": hc_url,
+            "interval": hc_interval,
+            "timeout": 3000,           # 3s timeout per probe
+            "lazy": False,             # keep checking even when idle
+            "max-failed-times": 3,     # 3 consecutive failures -> mark dead
+            "expected-status": 204,    # must return 204
+        }
+
         # Add Global Proxy Groups
         node_names = [n["name"] for n in active_nodes]
         proxy_groups.append({
             "name": "Global-Rotate",
             "type": "load-balance",
             "strategy": "round-robin",
-            "url": self.config.get("check_url", "http://www.gstatic.com/generate_204"),
-            "interval": self.config.get("check_interval_seconds", 300),
-            "proxies": node_names
+            "proxies": node_names,
+            **hc_params
         })
         proxy_groups.append({
             "name": "Global-Sticky",
             "type": "load-balance",
             "strategy": "consistent-hashing",
-            "url": self.config.get("check_url", "http://www.gstatic.com/generate_204"),
-            "interval": self.config.get("check_interval_seconds", 300),
-            "proxies": node_names
+            "proxies": node_names,
+            **hc_params
         })
 
         # Add Global Listeners (bind to 127.0.0.1 - only SmartProxy connects internally, no auth needed)
@@ -246,22 +299,20 @@ class CoreManager:
             rotate_group_name = f"{country}-Rotate"
             sticky_group_name = f"{country}-Sticky"
 
-            # Proxy Groups
+            # Proxy Groups (with hardened health checks)
             proxy_groups.append({
                 "name": rotate_group_name,
                 "type": "load-balance",
                 "strategy": "round-robin",
-                "url": self.config.get("check_url", "http://www.gstatic.com/generate_204"),
-                "interval": self.config.get("check_interval_seconds", 300),
-                "proxies": c_node_names
+                "proxies": c_node_names,
+                **hc_params
             })
             proxy_groups.append({
                 "name": sticky_group_name,
                 "type": "load-balance",
                 "strategy": "consistent-hashing",
-                "url": self.config.get("check_url", "http://www.gstatic.com/generate_204"),
-                "interval": self.config.get("check_interval_seconds", 300),
-                "proxies": c_node_names
+                "proxies": c_node_names,
+                **hc_params
             })
 
             # Listeners (bind to 127.0.0.1, no auth - SmartProxy handles auth externally)
@@ -313,7 +364,7 @@ class CoreManager:
         return self.country_ports
 
     def _read_logs(self):
-        """Thread worker to read stdout/stderr from Mihomo and put in queue."""
+        """Thread worker to read stdout/stderr from Mihomo. Auto-restarts on crash."""
         while self.is_running and self.process:
             line = self.process.stdout.readline()
             if not line:
@@ -322,9 +373,53 @@ class CoreManager:
             line_str = line.decode('utf-8', errors='ignore').strip()
             if line_str:
                 self.add_log(f"[Mihomo] {line_str}")
-                
+        
+        # Process exited — decide whether to auto-restart
+        if self._graceful_stop:
+            # Intentional stop, don't restart
+            self.is_running = False
+            logger.info("Mihomo log reading thread exited (graceful stop).")
+            return
+        
+        # Unexpected crash — attempt auto-restart
         self.is_running = False
-        logger.info("Mihomo log reading thread exited.")
+        logger.warning("Mihomo process exited unexpectedly!")
+        self.add_log("[ERROR] Mihomo core process crashed unexpectedly!")
+        
+        now = time.time()
+        # Reset restart counter if last crash was more than 5 minutes ago
+        if now - self._last_restart_time > 300:
+            self._restart_count = 0
+        
+        MAX_RESTARTS = 3
+        if self._restart_count >= MAX_RESTARTS:
+            logger.error(f"Mihomo crashed {MAX_RESTARTS} times in 5 minutes. Giving up auto-restart.")
+            self.add_log(f"[ERROR] Mihomo crashed {MAX_RESTARTS} times in 5 minutes. Auto-restart disabled. Please check logs and restart manually.")
+            return
+        
+        self._restart_count += 1
+        self._last_restart_time = now
+        wait_secs = self._restart_count * 2  # backoff: 2s, 4s, 6s
+        logger.info(f"Auto-restarting Mihomo in {wait_secs}s (attempt {self._restart_count}/{MAX_RESTARTS})...")
+        self.add_log(f"[System] Auto-restarting Mihomo in {wait_secs}s (attempt {self._restart_count}/{MAX_RESTARTS})...")
+        time.sleep(wait_secs)
+        
+        # Clean up old process
+        try:
+            if self.process:
+                self.process.kill()
+                self.process.wait(timeout=3)
+        except:
+            pass
+        self.process = None
+        
+        # Restart
+        if self.start():
+            logger.info("Mihomo auto-restart successful!")
+            self.add_log("[System] Mihomo auto-restart successful!")
+        else:
+            logger.error("Mihomo auto-restart failed!")
+            self.add_log("[ERROR] Mihomo auto-restart failed!")
 
     def start(self) -> bool:
         """Start the Mihomo core process."""
@@ -353,6 +448,7 @@ class CoreManager:
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             )
             
+            self._graceful_stop = False  # Allow auto-restart on crash
             self.is_running = True
             
             # Start logging background thread
@@ -369,13 +465,14 @@ class CoreManager:
             return False
 
     def stop(self):
-        """Stop the Mihomo core process."""
+        """Stop the Mihomo core process (intentional)."""
         if not self.is_running or not self.process:
             return
 
         logger.info("Stopping Mihomo core process...")
         self.add_log("[System] Stopping Mihomo core backend...")
         
+        self._graceful_stop = True  # Prevent auto-restart in _read_logs
         self.is_running = False
         try:
             self.process.terminate()
