@@ -351,9 +351,9 @@ function renderPortsTable() {
     const cardDesc = document.querySelector('.panel-right .card-desc');
     if (cardDesc) {
         if (authEnabled) {
-            cardDesc.innerHTML = `<span style="color: #10b981; font-weight: 600;">🔒 安全凭证认证已启用</span>：所有直达中继端口均已启用相同的账号密码保护，支持各地区独立覆盖凭据。`;
+            cardDesc.innerHTML = `<span style="color: #10b981; font-weight: 600;">🔒 安全凭证认证已启用</span>：所有路由均在 1080 端口，使用以下账号名作为代理用户名。密码为您的统一代理密码。`;
         } else {
-            cardDesc.innerHTML = `为不需要账号验证性软件提供的独立直达 HTTP/SOCKS5 混合协议端口列表。`;
+            cardDesc.innerHTML = `所有路由均在 1080 端口，请将以下账号名填入代理用户名（无需密码）。`;
         }
     }
     
@@ -380,8 +380,8 @@ function renderPortsTable() {
                 </div>
             </td>
             <td>${systemStatus.total_nodes || 0}</td>
-            <td><code class="cr-code">${gLockBadge}mixed @ ${globalData.ports.rotate}</code></td>
-            <td><code class="cr-code">${gLockBadge}mixed @ ${globalData.ports.sticky}</code></td>
+            <td><code class="cr-code">${gLockBadge}GLOBAL-rotate</code></td>
+            <td><code class="cr-code">${gLockBadge}GLOBAL-sticky</code></td>
             <td><code class="cr-code" style="color: #60a5fa; font-weight: 500;">${trafficText}</code></td>
         `;
         portsTableBody.appendChild(tr);
@@ -411,8 +411,8 @@ function renderPortsTable() {
                 </div>
             </td>
             <td>${cData.nodes.length}</td>
-            <td><code class="cr-code">${cLockBadge}mixed @ ${cData.ports.rotate}</code></td>
-            <td><code class="cr-code">${cLockBadge}mixed @ ${cData.ports.sticky}</code></td>
+            <td><code class="cr-code">${cLockBadge}${country}-rotate</code></td>
+            <td><code class="cr-code">${cLockBadge}${country}-sticky</code></td>
             <td><code class="cr-code" style="color: #60a5fa; font-weight: 500;">${trafficText}</code></td>
         `;
         portsTableBody.appendChild(tr);
