@@ -7,6 +7,19 @@ logger = logging.getLogger("SmartProxy")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 class SmartProxyServer:
+    def _set_keepalive(self, sock):
+        if sock is None: return
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            if hasattr(socket, 'TCP_KEEPIDLE'):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
+            if hasattr(socket, 'TCP_KEEPINTVL'):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+            if hasattr(socket, 'TCP_KEEPCNT'):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5)
+        except Exception as e:
+            logger.debug(f"Failed to set keepalive: {e}")
+
     def __init__(self, host: str, port: int, core_manager, config: dict):
         self.host = host
         self.port = port
@@ -347,12 +360,17 @@ class SmartProxyServer:
         client_writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         await client_writer.drain()
         
-        # Bidirectional pipe
-        await asyncio.gather(
-            self.pipe(client_reader, clash_writer, session_key, country, "tx"),
-            self.pipe(clash_reader, client_writer, session_key, country, "rx"),
-            return_exceptions=True
-        )
+        self._set_keepalive(client_writer.get_extra_info('socket'))
+        self._set_keepalive(clash_writer.get_extra_info('socket'))
+        
+        # Bidirectional pipe with safe cancellation
+        tx_task = asyncio.create_task(self.pipe(client_reader, clash_writer, session_key, country, "tx"))
+        rx_task = asyncio.create_task(self.pipe(clash_reader, client_writer, session_key, country, "rx"))
+        
+        done, pending = await asyncio.wait([tx_task, rx_task], return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+            
         self.active_sessions.pop(session_key, None)
     
     async def _handle_http_forward(self, client_reader, client_writer, first_line, raw_headers, headers, target_port, session_key, country):
@@ -452,12 +470,17 @@ class SmartProxyServer:
         clash_writer.write(new_request_line + rebuilt_headers + b"\r\n")
         await clash_writer.drain()
         
-        # Bidirectional pipe
-        await asyncio.gather(
-            self.pipe(client_reader, clash_writer, session_key, country, "tx"),
-            self.pipe(clash_reader, client_writer, session_key, country, "rx"),
-            return_exceptions=True
-        )
+        self._set_keepalive(client_writer.get_extra_info('socket'))
+        self._set_keepalive(clash_writer.get_extra_info('socket'))
+
+        # Bidirectional pipe with safe cancellation
+        tx_task = asyncio.create_task(self.pipe(client_reader, clash_writer, session_key, country, "tx"))
+        rx_task = asyncio.create_task(self.pipe(clash_reader, client_writer, session_key, country, "rx"))
+        
+        done, pending = await asyncio.wait([tx_task, rx_task], return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+            
         self.active_sessions.pop(session_key, None)
     
     # ==================== SOCKS5 HANDLER ====================
@@ -658,11 +681,15 @@ class SmartProxyServer:
             client_writer.write(bytes([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]))
             await client_writer.drain()
 
-            await asyncio.gather(
-                self.pipe(client_reader, clash_writer, session_key, country, "tx"),
-                self.pipe(clash_reader, client_writer, session_key, country, "rx"),
-                return_exceptions=True
-            )
+            self._set_keepalive(client_writer.get_extra_info('socket'))
+            self._set_keepalive(clash_writer.get_extra_info('socket'))
+
+            tx_task = asyncio.create_task(self.pipe(client_reader, clash_writer, session_key, country, "tx"))
+            rx_task = asyncio.create_task(self.pipe(clash_reader, client_writer, session_key, country, "rx"))
+            
+            done, pending = await asyncio.wait([tx_task, rx_task], return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
             
             self.active_sessions.pop(session_key, None)
 
