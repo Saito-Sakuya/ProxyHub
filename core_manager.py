@@ -67,8 +67,8 @@ class CoreManager:
         logger.info("Mihomo core not found. Starting automatic download...")
         self.add_log(f"[System] Mihomo core binary ({self.binary_name}) not found. Starting download...")
 
-        # We download v1.18.0 which is stable and verified
-        version = "v1.18.0"
+        # v1.19.25 supports anytls, tailscale, openvpn and latest protocols
+        version = "v1.19.25"
         if self.is_windows:
             filename = f"mihomo-windows-amd64-{version}.zip"
         else:
